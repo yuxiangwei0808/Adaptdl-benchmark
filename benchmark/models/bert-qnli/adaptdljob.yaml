@@ -1,0 +1,41 @@
+apiVersion: adaptdl.petuum.com/v1
+kind: AdaptDLJob
+metadata:
+  generateName: bert-
+spec:
+  template:
+    spec:
+      containers:
+      - name: main
+        command:
+        - python3
+        - run_glue.py
+        - --model_name_or_path=bert-base-uncased
+        - --task_name=qnli
+        - --per_device_train_batch_size=32
+        - --learning_rate=3e-5
+        - --num_train_epochs=3
+        - --cache_dir=/workspace/test/glue
+        - --output_dir=/tmp/output
+        - --with_tracking
+        env:
+        - name: PYTHONUNBUFFERED
+          value: "true"
+        resources:
+          limits:
+            nvidia.com/gpu: 1
+            cpu: 10
+            memory: "40G"
+          requests:
+            nvidia.com/gpu: 1
+            cpu: 10
+            memory: "40G"
+        volumeMounts:
+        - name: storage
+          mountPath: /workspace/test
+      volumes:
+      - name: storage
+        persistentVolumeClaim:
+          claimName: adaptdl-data
+      imagePullSecrets:
+      - name: regcred

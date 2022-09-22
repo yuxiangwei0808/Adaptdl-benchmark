@@ -1,0 +1,9 @@
+#numpy==1.17.3
+opencv-python==4.5.5.64
+matplotlib
+#torch==1.0.0
+#torchvision==0.2.2
+#tqdm==4.31.1
+tensorboard
+#pickleshare==0.7.5
+tensorboardX

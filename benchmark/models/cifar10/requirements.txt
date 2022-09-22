@@ -1,0 +1,10 @@
+future
+numpy
+pandas
+prometheus_client
+redis
+scipy
+statsmodels
+tensorboard
+tensorboardX
+torchvision
