@@ -189,16 +189,8 @@ def validate(val_loader, model, criterion, epoch, args, writer):
             # measure accuracy and record loss
             (acc1, correct1, total1), (acc5, correct5, total5) = accuracy(output, target, topk=(1, 5))
             losses.update(loss.item(), images.size(0))
-            stats["loss_sum"] += loss.item() * images.size(0)
-            stats["loss_cnt"] += images.size(0)
             top1.update(acc1[0], images.size(0))
             top5.update(acc5[0], images.size(0))
-            stats["correct1"] += correct1
-            stats["total1"] += total1
-            stats["correct5"] += correct5
-            stats["total5"] += total5
-            stats["total"] += images.shape[0]
-
             # measure elapsed time
             batch_time.update(time.time() - end)
             end = time.time()
@@ -210,14 +202,6 @@ def validate(val_loader, model, criterion, epoch, args, writer):
         print(' * Acc@1 {top1.avg:.3f} Acc@5 {top5.avg:.3f}'
               .format(top1=top1, top5=top5))
         use_time = time.time() - begin_valid_time
-        with stats.synchronized():
-            stats["acc1"] = stats["correct1"] / stats["total1"]
-            stats["acc5"] = stats["correct5"] / stats["total5"]
-            stats["loss"] = stats["loss_sum"] / stats["loss_cnt"]
-            writer.add_scalar("top1/Valid", stats["acc1"], epoch)
-            writer.add_scalar("top5/Valid", stats["acc5"], epoch)
-            report_valid_metrics(epoch, stats["loss"], acc1=stats["acc1"], acc5 = stats["acc5"], \
-                per_epoch_time=use_time, samples=stats["total"])
     
     return top1.avg
 

@@ -6,9 +6,9 @@ import math
 import os
 import random
 import time
+import tqdm
 from pathlib import Path
 
-from tensorboardX import SummaryWriter
 import datasets
 import torch
 from datasets import load_dataset, load_from_disk
@@ -31,13 +31,6 @@ from transformers import (
 )
 from transformers.utils import check_min_version, get_full_repo_name, send_example_telemetry
 from transformers.utils.versions import require_version
-
-import adaptdl
-import adaptdl.torch
-import adaptdl.env
-import adaptdl.collective
-from adaptdl._signal import get_exit_flag
-from adaptdl.torch._metrics import get_progress, report_train_metrics, report_valid_metrics
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 check_min_version("4.23.0.dev0")
@@ -82,6 +75,12 @@ def parse_args():
             "The maximum total input sequence length after tokenization. Sequences longer than this will be truncated,"
             " sequences shorter will be padded if `--pad_to_max_lengh` is passed."
         ),
+    )
+    parser.add_argument(
+        "--data_dir",
+        default="",
+        type=str,
+        help="Where do you want to load the data from disk.",
     )
     parser.add_argument(
         "--cache_dir",
@@ -223,7 +222,6 @@ def main(task_name=None):
     if task_name is not None:
         args.task_name = task_name
         
-    tb_writer = SummaryWriter(os.path.join(os.getenv("ADAPTDL_TENSORBOARD_LOGDIR", "/tmp"), f'/{args.task_name}'))
     # tb_writer = SummaryWriter('./tmp')
 
     # Initialize the accelerator. We will let the accelerator handle device placement for us in this example.
@@ -245,28 +243,24 @@ def main(task_name=None):
     if args.seed is not None:
         set_seed(args.seed)
 
-    if task_name is None:
-        adaptdl.torch.init_process_group("nccl" if torch.cuda.is_available() else "gloo")
-
     if not os.path.exists(args.output_dir):
         os.makedirs(args.output_dir)
 
     # Handle the repository creation
-    if adaptdl.env.replica_rank() == 0:
-        if args.push_to_hub:
-            if args.hub_model_id is None:
-                repo_name = get_full_repo_name(Path(args.output_dir).name, token=args.hub_token)
-            else:
-                repo_name = args.hub_model_id
-            repo = Repository(args.output_dir, clone_from=repo_name)
+    if args.push_to_hub:
+        if args.hub_model_id is None:
+            repo_name = get_full_repo_name(Path(args.output_dir).name, token=args.hub_token)
+        else:
+            repo_name = args.hub_model_id
+        repo = Repository(args.output_dir, clone_from=repo_name)
 
-            with open(os.path.join(args.output_dir, ".gitignore"), "w+") as gitignore:
-                if "step_*" not in gitignore:
-                    gitignore.write("step_*\n")
-                if "epoch_*" not in gitignore:
-                    gitignore.write("epoch_*\n")
-        elif args.output_dir is not None:
-            os.makedirs(args.output_dir, exist_ok=True)
+        with open(os.path.join(args.output_dir, ".gitignore"), "w+") as gitignore:
+            if "step_*" not in gitignore:
+                gitignore.write("step_*\n")
+            if "epoch_*" not in gitignore:
+                gitignore.write("epoch_*\n")
+    elif args.output_dir is not None:
+        os.makedirs(args.output_dir, exist_ok=True)
     # accelerator.wait_for_everyone()
 
     # Get the datasets: you can either provide your own CSV/JSON training and evaluation files (see below)
@@ -294,7 +288,7 @@ def main(task_name=None):
     #     extension = (args.train_file if args.train_file is not None else args.validation_file).split(".")[-1]
     #     raw_datasets = load_dataset(extension, data_files=data_files)
     # raw_datasets.save_to_disk(f'./data/{args.task_name}/')
-    raw_datasets = load_from_disk(f'/workspace/test/glue/{args.task_name}')
+    raw_datasets = load_from_disk(os.path.join(args.data_dir, args.task_name))
     # raw_datasets = load_from_disk(f'/home/lcwyx/demo_adaptdl/job_submit/adaptdl/benchmark/models/bert/data/{args.task_name}')
 
     # See more about loading any type of standard or custom dataset at
@@ -397,22 +391,12 @@ def main(task_name=None):
                 result["labels"] = examples["label"]
         return result
 
-    if adaptdl.env.replica_rank() == 0:
-        processed_datasets = raw_datasets.map(
-            preprocess_function,
-            batched=True,
-            remove_columns=raw_datasets["train"].column_names,
-            desc="Running tokenizer on dataset",
-        )
-        torch.distributed.barrier()
-    else:
-        torch.distributed.barrier()
-        processed_datasets = raw_datasets.map(
-            preprocess_function,
-            batched=True,
-            remove_columns=raw_datasets["train"].column_names,
-            desc="Running tokenizer on dataset",
-        )
+    processed_datasets = raw_datasets.map(
+        preprocess_function,
+        batched=True,
+        remove_columns=raw_datasets["train"].column_names,
+        desc="Running tokenizer on dataset",
+    )
 
     train_dataset = processed_datasets["train"]
     eval_dataset = processed_datasets["validation_matched" if args.task_name == "mnli" else "validation"]
@@ -455,9 +439,8 @@ def main(task_name=None):
     ]
     optimizer = torch.optim.Adam(optimizer_grouped_parameters, lr=args.learning_rate)
 
-    train_dataloader = adaptdl.torch.AdaptiveDataLoader(train_dataset, batch_size=args.per_device_train_batch_size, drop_last=True)
-    train_dataloader.autoscale_batch_size(384, local_bsz_bounds=(4, 64), gradient_accumulation=True)
-    eval_dataloader = adaptdl.torch.AdaptiveDataLoader(eval_dataset, batch_size=args.per_device_eval_batch_size)
+    train_dataloader = torch.utils.data.DataLoader(train_dataset, batch_size=args.per_device_train_batch_size, drop_last=True)
+    eval_dataloader = torch.utils.data.DataLoader(eval_dataset, batch_size=args.per_device_eval_batch_size)
 
     # Scheduler and math around the number of training steps.
     overrode_max_train_steps = False
@@ -472,8 +455,6 @@ def main(task_name=None):
         num_warmup_steps=args.num_warmup_steps,
         num_training_steps=args.max_train_steps,
     )
-
-    model = adaptdl.torch.AdaptiveDataParallel(model, optimizer, lr_scheduler)
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
@@ -538,90 +519,67 @@ def main(task_name=None):
             starting_epoch = resume_step // len(train_dataloader)
             resume_step -= starting_epoch * len(train_dataloader)
 
-    # model.zero_grad()
-    if adaptdl.collective.allreduce(get_exit_flag()):
-        exit(143)
-
-    for epoch in adaptdl.torch.remaining_epochs_until(args.num_train_epochs):
-        accum = adaptdl.torch.Accumulator()
+    for epoch in range(args.num_train_epochs):
+        pbar = tqdm(train_dataloader, f"Bert sst2 {epoch}/{args.num_train_epochs}")
         # if args.with_tracking:
         #     total_loss = 0
-        begin = time.time()
-        for step, batch in enumerate(train_dataloader):
-            batch_size = len(batch['input_ids'][0])
-            model.train()
-            # We need to skip steps until we reach the resumed step
-            # if args.resume_from_checkpoint and epoch == starting_epoch:
-            #     if resume_step is not None and step < resume_step:
-            #         completed_steps += 1
-            #         continue
-            for key in batch:
-                tensor = None
-                if isinstance(batch[key], list):
-                    for l in batch[key]:
-                        if tensor is None:
-                            tensor = l.view(batch_size, 1)
-                        else:
-                            tensor = torch.concat((tensor, l.view(batch_size, 1)), dim=1)
-                    batch[key] = tensor.to(torch.cuda.current_device())
-                else:
-                    batch[key] = batch[key].to(torch.cuda.current_device())
+        with pbar as t:
+            begin = time.time()
+            for step, batch in enumerate(t):
+                batch_size = len(batch['input_ids'][0])
+                model.train()
+                # We need to skip steps until we reach the resumed step
+                # if args.resume_from_checkpoint and epoch == starting_epoch:
+                #     if resume_step is not None and step < resume_step:
+                #         completed_steps += 1
+                #         continue
+                for key in batch:
+                    tensor = None
+                    if isinstance(batch[key], list):
+                        for l in batch[key]:
+                            if tensor is None:
+                                tensor = l.view(batch_size, 1)
+                            else:
+                                tensor = torch.concat((tensor, l.view(batch_size, 1)), dim=1)
+                        batch[key] = tensor.to(torch.cuda.current_device())
+                    else:
+                        batch[key] = batch[key].to(torch.cuda.current_device())
 
-            outputs = model(**batch)
-            loss = outputs.loss
+                outputs = model(**batch)
+                loss = outputs.loss
 
-            accum["loss_sum"] += loss.item()
-            accum["loss_cnt"] += batch['input_ids'].shape[0]
+                loss.backward()
 
-            loss.backward()
+                # We keep track of the loss at each epoch
+                # if args.with_tracking:
+                #     total_loss += loss.detach().float()
+                # loss = loss / args.gradient_accumulation_steps
+                # if step % args.gradient_accumulation_steps == 0 or step == len(train_dataloader) - 1:
+                #     optimizer.step()
+                #     lr_scheduler.step()
+                #     optimizer.zero_grad()
+                #     progress_bar.update(1)
+                completed_steps += 1
 
-            if train_dataloader._elastic.is_sync_step():
-                torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+                optimizer.step()
+                lr_scheduler.step()
+                # if current_step < args.warmup_steps:
+                #     factor = float(current_step) / float(max(1, args.warmup_steps))
+                # else:
+                #     factor = max(0.0, float(t_total - current_step) / float(max(1, t_total - args.warmup_steps)))
+                # for group in optimizer.param_groups:
+                #     group["lr"] = args.learning_rate * factor
 
-            # We keep track of the loss at each epoch
-            # if args.with_tracking:
-            #     total_loss += loss.detach().float()
-            # loss = loss / args.gradient_accumulation_steps
-            # if step % args.gradient_accumulation_steps == 0 or step == len(train_dataloader) - 1:
-            #     optimizer.step()
-            #     lr_scheduler.step()
-            #     optimizer.zero_grad()
-            #     progress_bar.update(1)
-            completed_steps += 1
+                # model.zero_grad()
 
-            optimizer.step()
-            lr_scheduler.step()
+                # if isinstance(checkpointing_steps, int):
+                #     if completed_steps % checkpointing_steps == 0:
+                #         output_dir = f"step_{completed_steps }"
+                #         if args.output_dir is not None:
+                #             output_dir = os.path.join(args.output_dir, output_dir)
+                #         accelerator.save_state(output_dir)
 
-            current_step = get_progress()
-            # if current_step < args.warmup_steps:
-            #     factor = float(current_step) / float(max(1, args.warmup_steps))
-            # else:
-            #     factor = max(0.0, float(t_total - current_step) / float(max(1, t_total - args.warmup_steps)))
-            # for group in optimizer.param_groups:
-            #     group["lr"] = args.learning_rate * factor
-
-            # model.zero_grad()
-
-            # if isinstance(checkpointing_steps, int):
-            #     if completed_steps % checkpointing_steps == 0:
-            #         output_dir = f"step_{completed_steps }"
-            #         if args.output_dir is not None:
-            #             output_dir = os.path.join(args.output_dir, output_dir)
-            #         accelerator.save_state(output_dir)
-
-            train_dataloader.to_tensorboard(tb_writer, current_step, "AdaptDL/Data")
-            model.to_tensorboard(tb_writer, current_step, "AdaptDL/Model")
-            tb_writer.add_scalar("loss", loss.item(), current_step)
-
-            print(current_step, loss.item())
-            # if completed_steps >= args.max_train_steps:
-            #     break
         use_time = time.time() - begin
-        with accum.synchronized():
-            accum["loss_avg"] = accum["loss_sum"] / accum["loss_cnt"]
-            tb_writer.add_scalar("Loss/Train", accum["loss_avg"], epoch)
-            report_train_metrics(epoch, accum["loss_avg"], per_epoch_time=use_time, samples=accum["loss_cnt"], task_name=args.task_name)
-            print("Train:", accum)
 
         ### evaluation
         logger.info('Begin Evaluatation')
@@ -647,9 +605,6 @@ def main(task_name=None):
                 outputs = model(**batch)
                 valid_loss = outputs.loss
 
-                accum["loss_sum"] += valid_loss.item()
-                accum["loss_cnt"] += batch['input_ids'].shape[0]
-                
             predictions = outputs.logits.argmax(dim=-1) if not is_regression else outputs.logits.squeeze()
             # predictions, references = accelerator.gather((predictions, batch["labels"]))
             # If we are in a multiprocess environment, the last batch has duplicates
@@ -677,11 +632,6 @@ def main(task_name=None):
                 }
             )
         use_time = time.time() - begin_valid
-        with accum.synchronized():
-            accum["loss_avg"] = accum["loss_sum"] / accum["loss_cnt"]
-            tb_writer.add_scalar("Loss/Valid", accum["loss_avg"], epoch)
-            tb_writer.add_scalar('eval_acc', eval_metric["accuracy"], epoch)
-            report_valid_metrics(epoch, accum["loss_avg"], accuracy=eval_metric["accuracy"], per_epoch_time=use_time, samples=accum["loss_cnt"], task_name=args.task_name)
 
         # if args.push_to_hub and epoch < args.num_train_epochs - 1:
         #     accelerator.wait_for_everyone()
@@ -710,13 +660,12 @@ def main(task_name=None):
         # unwrapped_model.save_pretrained(
         #     args.output_dir, is_main_process=accelerator.is_main_process, save_function=accelerator.save
         # )
-        if adaptdl.env.replica_rank() == 0:
-            model_to_save = model.module if hasattr(model, "module") else model
-            model_to_save.save_pretrained(args.output_dir)
-            tokenizer.save_pretrained(args.output_dir)
-            torch.save(args, os.path.join(args.output_dir, "training_args.bin"))
-            if args.push_to_hub:
-                repo.push_to_hub(commit_message="End of training", auto_lfs_prune=True)
+        model_to_save = model.module if hasattr(model, "module") else model
+        model_to_save.save_pretrained(args.output_dir)
+        tokenizer.save_pretrained(args.output_dir)
+        torch.save(args, os.path.join(args.output_dir, "training_args.bin"))
+        if args.push_to_hub:
+            repo.push_to_hub(commit_message="End of training", auto_lfs_prune=True)
 
     # if args.task_name == "mnli":
     #     # Final evaluation on mismatched validation set
@@ -741,12 +690,8 @@ def main(task_name=None):
     if args.output_dir is not None:
         with open(os.path.join(args.output_dir, "all_results.json"), "w") as f:
             json.dump({"eval_accuracy": eval_metric["accuracy"]}, f)
-    tb_writer.export_scalars_to_json(os.getenv("ADAPTDL_TENSORBOARD_LOGDIR", "/tmp") + f'{args.task_name}_tensorboard.json')
-    tb_writer.close()
 
 
 if __name__ == "__main__":
     s = time.time()
     main()
-    with open(adaptdl.env.checkpoint_path() + "/overall_results.txt", "a") as f:
-        f.write(f'total consume time: {time.time() - s}')
