@@ -1,109 +1,118 @@
+'''Train CIFAR10 with PyTorch.'''
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
+import torch.backends.cudnn as cudnn
+
+import torchvision
+import torchvision.transforms as transforms
+
+import os
 import argparse
 import time
-import hyadis
-import ray
-import torch
-from hyadis.elastic.parallel import ElasticDistributedDataLoader, ElasticDistributedDataParallel, ElasticOptimizer
-from hyadis.utils import get_job_id, get_logger
-from torchvision import datasets
-from torchvision.models import resnet18
-from torchvision.transforms import transforms
-from tqdm import tqdm
-from hyadis.utils import get_logger
-from hyadis.elastic import ReturnObjects
+
+from models import *
+
+from torch.optim.lr_scheduler import ExponentialLR
+from tensorboardX import SummaryWriter
+
+s = time.time()
+
+parser = argparse.ArgumentParser(description='PyTorch CIFAR10 Training')
+parser.add_argument('--bs', default=128, type=int, help='batch size')
+parser.add_argument('--lr', default=0.08, type=float, help='learning rate')
+parser.add_argument('--epochs', default=90, type=int, help='number of epochs')
+parser.add_argument('--model', default='ResNet18', type=str, help='model')
+args = parser.parse_args()
+
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+# Data
+print('==> Preparing data..')
+transform_train = transforms.Compose([
+    transforms.RandomCrop(32, padding=4),
+    transforms.RandomHorizontalFlip(),
+    transforms.ToTensor(),
+    transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+])
+
+transform_test = transforms.Compose([
+    transforms.ToTensor(),
+    transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+])
+
+trainset = torchvision.datasets.CIFAR10(root="/workspace/data", train=True, download=True, transform=transform_train)
+trainloader = torch.utils.data.DataLoader(trainset, batch_size=args.bs, shuffle=True, num_workers=2, drop_last=True)
+trainloader.autoscale_batch_size(4096, local_bsz_bounds=(32, 1024),
+                                 gradient_accumulation=True)
+
+validset = torchvision.datasets.CIFAR10(root="/workspace/data", train=False, download=False, transform=transform_test)
+validloader = torch.utils.data.DataLoader(validset, batch_size=100, shuffle=False, num_workers=2)
+
+# Model
+print('==> Building model..')
+net = eval(args.model)()
+# net = VGG('VGG19')
+# net = ResNet18()
+# net = PreActResNet18()
+# net = GoogLeNet()
+# net = DenseNet121()
+# net = ResNeXt29_2x64d()
+# net = MobileNet()
+# net = MobileNetV2()
+# net = DPN92()
+# net = ShuffleNetG2()
+# net = SENet18()
+# net = ShuffleNetV2(1)
+net = net.to(device)
+if device == 'cuda':
+    cudnn.benchmark = True
+
+criterion = nn.CrossEntropyLoss()
+#optimizer = optim.SGD([{"params": [param]} for param in net.parameters()],
+optimizer = optim.SGD(net.parameters(),
+                      lr=args.lr, momentum=0.9, weight_decay=5e-4)
+lr_scheduler = ExponentialLR(optimizer, 0.0133 ** (1.0 / args.epochs))
+
+# Training
+def train(epoch):
+    print('\nEpoch: %d' % epoch)
+    begin_train_time = time.time()
+    net.train()
+    for inputs, targets in trainloader:
+        inputs, targets = inputs.to(device), targets.to(device)
+        optimizer.zero_grad()
+        outputs = net(inputs)
+        loss = criterion(outputs, targets)
+        loss.backward()
+        optimizer.step()
+
+        _, predicted = outputs.max(1)
+
+        trainloader.to_tensorboard(writer, epoch, tag_prefix="AdaptDL/Data")
+        net.to_tensorboard(writer, epoch, tag_prefix="AdaptDL/Model")
+
+    use_time = time.time() - begin_train_time
+
+def valid(epoch):
+    begin_valid_time = time.time()
+    net.eval()
+    with torch.no_grad():
+        for inputs, targets in validloader:
+            inputs, targets = inputs.to(device), targets.to(device)
+            outputs = net(inputs)
+            loss = criterion(outputs, targets)
+
+            _, predicted = outputs.max(1)
+    
+    use_time = time.time() - begin_valid_time
+    
 
 
-def get_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--num_workers', type=int)
-    parser.add_argument('--data_path', type=str)
-    parser.add_argument('--batch_size', type=int)
-    return parser.parse_args()
-
-
-@hyadis.elastic.initialization(True)
-def test_init(path, batch_size=None, learning_rate=None):
-    transform = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
-        transforms.Resize((224, 224))
-    ])
-
-    training_data = datasets.CIFAR10(
-        root=path,
-        train=True,
-        download=True,
-        transform=transform,
-    )
-
-    model = resnet18()
-    model.to(torch.cuda.current_device())
-    criterion = torch.nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-    dataloader = ElasticDistributedDataLoader(dataset=training_data,
-                                              batch_size=batch_size,
-                                              shuffle=True,
-                                              drop_last=False)
-
-    return ReturnObjects(model=model, data=dataloader, optim=optimizer, criterion=criterion)
-
-
-@hyadis.elastic.train_step
-def test_train(data, engine, **kwargs):
-    engine.train()
-    x, y = data
-    x, y = x.to(torch.cuda.current_device()), y.to(torch.cuda.current_device())
-    engine.zero_grad()
-    o = engine(x)
-    loss = engine.criterion(o, y)
-    engine.backward(loss)
-    engine.step()
-    return ReturnObjects(loss=loss)
-
-
-def train(epoch, runner):
-    logger = get_logger()
-    runner.set_epoch(epoch)
-    epoch_end = False
-    num_samples = 0
-    start_time = time.time()
-    progress = tqdm(total=len(runner.data))
-    while not epoch_end:
-        epoch_end = test_train()
-        if not epoch_end:
-            num_samples += runner.global_batch_size
-            progress.update(1)
-    progress.close()
-
-    end_time = time.time()
-    logger.info(f"[Epoch {epoch}] Loss = {runner.reduced_loss.item():.3f} | " + f"LR = {runner.learning_rate:.3f} | " +
-                f"Throughput = {num_samples/(end_time - start_time):.3f}")
-
-
-def main():
-    args = get_args()
-    job_start = time.time()
-    ray.init()
-    print(f"{get_job_id()} (size={args.num_workers}) start")
-    runner = hyadis.elastic.init(args.num_workers,
-                                 use_gpu=True,
-                                 autoscale=False,
-                                 global_batch_size=args.batch_size * args.num_workers,
-                                 learning_rate=0.01)
-    print(f"{get_job_id()} (size={runner.size()}) ready")
-
-    test_init(args.data_path)
-
-    train(0, runner)
-    runner.resize(4)
-    for epoch in range(1, 6):
-        train(epoch, runner)
-
-    job_end = time.time()
-    print(f"{get_job_id()} (size={runner.size()}) complete: used time = {job_end - job_start:.3f}")
-
-    runner.shutdown()
-
-
-if __name__ == "__main__":
-    main()
+with SummaryWriter(os.getenv("ADAPTDL_TENSORBOARD_LOGDIR", "/tmp")) as writer:
+    for epoch in range(args.epochs):
+        train(epoch)
+        valid(epoch)
+        lr_scheduler.step()
+    writer.export_scalars_to_json(os.getenv("ADAPTDL_TENSORBOARD_LOGDIR", "/tmp") + 'tensorboard.json')
