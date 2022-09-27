@@ -4,6 +4,7 @@ import random
 import shutil
 import time
 import warnings
+import tqdm
 import torch
 import torch.nn as nn
 import torch.nn.parallel
@@ -89,8 +90,6 @@ def main_worker(args):
                                 momentum=args.momentum,
                                 weight_decay=args.weight_decay)
 
-    model, optimizer = amp.initialize(model, optimizer)
-
     cudnn.benchmark = True
 
     transform = transforms.Compose([transforms.RandomResizedCrop(224),
@@ -103,13 +102,20 @@ def main_worker(args):
     train_loader = torch.utils.data.DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=True, drop_last=True,
         num_workers=args.workers, pin_memory=True)
-    if args.autoscale_bsz:
-        train_loader.autoscale_batch_size(12800, local_bsz_bounds=(20, 200), gradient_accumulation=True)
 
     val_loader = torch.utils.data.DataLoader(
         CustomDataset(data['validation'], transform),
         batch_size=args.batch_size, shuffle=False,
         num_workers=args.workers, pin_memory=True)
+
+    for epoch in range(args.epochs):
+        adjust_learning_rate(optimizer, epoch, args)
+
+        # train for one epoch
+        train(train_loader, model, criterion, optimizer, epoch, args, None)
+
+        # evaluate on validation set
+        acc1 = validate(val_loader, model, criterion, epoch, args, None)
 
 def train(train_loader, model, criterion, optimizer, epoch, args, writer):
     batch_time = AverageMeter('Time', ':6.3f')
@@ -145,19 +151,19 @@ def train(train_loader, model, criterion, optimizer, epoch, args, writer):
         top1.update(acc1[0], images.size(0))
         top5.update(acc5[0], images.size(0))
 
-        # compute gradient and do SGD step
-        delay_unscale = not train_loader._elastic.is_sync_step()
-        with amp.scale_loss(loss, optimizer, delay_unscale=delay_unscale) as scaled_loss:
-            model.adascale.loss_scale = _amp_state.loss_scalers[0].loss_scale()
-            scaled_loss.backward()
-        model.adascale.step()
+        # # compute gradient and do SGD step
+        # delay_unscale = not train_loader._elastic.is_sync_step()
+        # with amp.scale_loss(loss, optimizer, delay_unscale=delay_unscale) as scaled_loss:
+        #     model.adascale.loss_scale = _amp_state.loss_scalers[0].loss_scale()
+        #     scaled_loss.backward()
+        # model.adascale.step()
+        # model.step()
+        loss.backward()
+        optimizer.step()
 
         # measure elapsed time
         batch_time.update(time.time() - end)
         end = time.time()
-
-        if i % args.print_freq == 0:
-            progress.display(train_loader._elastic.current_index)
 
     use_time = time.time() - begin_train_time
 

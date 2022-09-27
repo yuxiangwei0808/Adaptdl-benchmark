@@ -18,17 +18,8 @@ from utils.tools import *
 import config.yolov3_config_voc as cfg
 from utils import cosine_lr_scheduler
 
-import adaptdl
-import adaptdl.env
-import adaptdl.torch
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from tensorboardX import SummaryWriter
-
-from apex import amp
-from apex.amp._amp_state import _amp_state
-
-from adaptdl.torch._metrics import report_train_metrics, report_valid_metrics, get_progress
-
+torch.autograd.set_detect_anomaly(True)
 
 class Trainer(object):
     def __init__(self, weight_path):
@@ -44,7 +35,7 @@ class Trainer(object):
                                                                  shuffle=True)
         self.valid_dataset = data.VocDataset(anno_file_type="test")
         self.valid_dataloader = torch.utils.data.DataLoader(self.valid_dataset,
-                                                                 batch_size=(8 * adaptdl.env.num_replicas()),
+                                                                 batch_size=8,
                                                                  num_workers=8,
                                                                  shuffle=False)
         self.yolov3 = Yolov3().cuda()
@@ -60,13 +51,10 @@ class Trainer(object):
         self.scheduler = CosineAnnealingLR(self.optimizer,
                                            T_max=(self.epochs - cfg.TRAIN["WARMUP_EPOCHS"]),
                                            eta_min=cfg.TRAIN["LR_END"])
-        self.yolov3, self.optimizer = amp.initialize(self.yolov3, self.optimizer)
-        self.yolov3.adascale._smoothing = 0.997
 
     def valid(self, epoch, writer):
         self.yolov3.train()
 
-        begin_valid_time = time.time()
         with torch.no_grad():
             for imgs, label_sbbox, label_mbbox, label_lbbox, sbboxes, mbboxes, lbboxes in self.valid_dataloader:
                 imgs = imgs.cuda()
@@ -95,11 +83,9 @@ class Trainer(object):
     def train(self):
         print(self.yolov3)
         print("Train datasets number is : {}".format(len(self.train_dataset)))
-        for epoch in adaptdl.torch.remaining_epochs_until(self.epochs):
+        for epoch in range(self.epochs):
             self.yolov3.train()
-            begin_train_time = time.time()
-            accum = adaptdl.torch.Accumulator()
-            for imgs, label_sbbox, label_mbbox, label_lbbox, sbboxes, mbboxes, lbboxes in self.train_dataloader:
+            for idx, (imgs, label_sbbox, label_mbbox, label_lbbox, sbboxes, mbboxes, lbboxes) in enumerate(self.train_dataloader):
                 imgs = imgs.cuda()
                 label_sbbox = label_sbbox.cuda()
                 label_mbbox = label_mbbox.cuda()
@@ -113,42 +99,22 @@ class Trainer(object):
                 loss, loss_giou, loss_conf, loss_cls = self.criterion(
                         p, p_d, label_sbbox, label_mbbox, label_lbbox, sbboxes, mbboxes, lbboxes)
 
-                delay_unscale = not self.train_dataloader._elastic.is_sync_step()
-                with amp.scale_loss(loss, self.optimizer, delay_unscale=delay_unscale) as scaled_loss:
-                    self.yolov3.adascale.loss_scale = _amp_state.loss_scalers[0].loss_scale()
-                    scaled_loss.backward()
-                self.yolov3.adascale.step()
-
-                accum["loss_sum"] += loss.item() * imgs.size(0)
-                accum["loss_cnt"] += imgs.size(0)
-
-                # Print batch results
-                print("Epoch {} train [{}/{}]:  img_size: {}  loss_giou: {:.4f}  loss_conf: {:.4f}  loss_cls: {:.4f}  loss: {:.4f}"
-                    .format(epoch, self.train_dataloader._elastic.current_index, len(self.train_dataset),
-                            self.train_dataset.img_size, loss_giou.item(), loss_conf.item(), loss_cls.item(), loss.item()))
+                loss.backward()
+                self.optimizer.step()
 
                 # Multi-scale training (320-608 pixels).
                 if self.multi_scale_train:
                     self.train_dataset.img_size = random.choice(range(10, 20)) * 32
-
-                global_step = int(self.yolov3.adascale._state["progress"])
 
                 del imgs, label_sbbox, label_mbbox, label_lbbox, sbboxes, mbboxes, lbboxes
                 del p, p_d, loss, loss_giou, loss_conf, loss_cls
 
                 if epoch < cfg.TRAIN["WARMUP_EPOCHS"]:
                     for group in self.optimizer.param_groups:
-                        group["lr"] = (get_progress() / len(self.train_dataset) *
+                        group["lr"] = (idx / len(self.train_dataset) *
                                     self.train_dataloader.batch_size /
                                     cfg.TRAIN["WARMUP_EPOCHS"]) * cfg.TRAIN["LR_INIT"]
                 print("lr =", self.optimizer.param_groups[0]["lr"])
-
-                use_train_time = time.time() - begin_train_time
-                
-            with accum.synchronized():
-                accum["loss_avg"] = accum["loss_sum"] / accum["loss_cnt"]
-                report_train_metrics(epoch, accum["loss_avg"], per_epoch_time=use_train_time, samples=accum["loss_cnt"])
-                print("Train:", accum)
 
             if epoch >= cfg.TRAIN["WARMUP_EPOCHS"]:
                 self.scheduler.step()
@@ -161,6 +127,3 @@ if __name__ == "__main__":
     opt = parser.parse_args()
 
     Trainer(weight_path=opt.weight_path).train()
-
-    with open(adaptdl.env.checkpoint_path() + "/overall_results.txt", "a") as f:
-        f.write(f'total consume time: {time.time() - s}')

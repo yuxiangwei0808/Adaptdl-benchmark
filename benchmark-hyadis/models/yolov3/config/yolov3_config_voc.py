@@ -1,7 +1,7 @@
 # coding=utf-8
 # project
-DATA_PATH = "/workspace/test/VOC"
-PROJECT_PATH = "/root/YOLOV3"
+DATA_PATH = "/benchmark/VOC"
+PROJECT_PATH = "/root/benchmark-hyadis/models/yolov3"
 
 
 DATA = {"CLASSES":['aeroplane', 'bicycle', 'bird', 'boat', 'bottle', 'bus',
