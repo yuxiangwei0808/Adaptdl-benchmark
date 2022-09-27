@@ -11,7 +11,6 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.utils.data as data
 import torch.backends.cudnn as cudnn
-from tensorboardX import SummaryWriter
 
 import model
 import config
@@ -115,28 +114,30 @@ train_loader = torch.utils.data.DataLoader(train_dataset, drop_last=True,
 
 ########################### TRAINING #####################################
 for epoch in range(args.epochs):
-    model.train() # Enable dropout (if have).
-    start_time = time.time()
-    train_loader.dataset.ng_sample()
-    for idx, (user, item, label) in enumerate(train_loader):
-        user = user.cuda()
-        item = item.cuda()
-        label = label.float().cuda()
+    pbar = tqdm(train_loader, f"NCF {epoch}/{args.epochs}")
+    with pbar as t:
+        model.train() # Enable dropout (if have).
+        start_time = time.time()
+        train_loader.dataset.ng_sample()
+        for idx, (user, item, label) in enumerate(t):
+            user = user.cuda()
+            item = item.cuda()
+            label = label.float().cuda()
 
-        model.zero_grad()
-        prediction = model(user, item)
-        loss = loss_function(prediction, label)
-        loss.backward()
-        optimizer.step()
+            model.zero_grad()
+            prediction = model(user, item)
+            loss = loss_function(prediction, label)
+            loss.backward()
+            optimizer.step()
 
-    model.eval()
-    HR, NDCG = evaluate.metrics(model, test_loader, args.top_k)
-    
-    elapsed_time = time.time() - start_time
-    print("\nThe time elapse of epoch {:03d}".format(epoch) + " is: " + 
-          time.strftime("%H: %M: %S", time.gmtime(elapsed_time)))
+        model.eval()
+        HR, NDCG = evaluate.metrics(model, test_loader, args.top_k)
+        
+        elapsed_time = time.time() - start_time
+        print("\nThe time elapse of epoch {:03d}".format(epoch) + " is: " + 
+              time.strftime("%H: %M: %S", time.gmtime(elapsed_time)))
 
-    scheduler.step()
+        scheduler.step()
 
 # with open(adaptdl.env.checkpoint_path() + "/overall_results.txt", "a") as f:
 #         f.write(f'total consume time: {time.time() - s}')
