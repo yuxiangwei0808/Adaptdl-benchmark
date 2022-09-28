@@ -5,7 +5,7 @@
 # image is Ray image to use for the head and workers of this Ray cluster.
 # It's recommended to build custom dependencies for your workload into this image,
 # taking one of the offical `rayproject/ray` images as base.
-image: cr-cn-beijing.volces.com/hpcaitech/hyadis-runtime:latest
+image: cr-cn-beijing.volces.com/hpcaitech/hyadis-runtime-benchmark-dependency:latest
 # headPodType is the podType used for the Ray head node (as configured below).
 headPodType: rayHeadType
 # podTypes is the list of pod configurations available for use as Ray nodes.
