@@ -1,118 +1,170 @@
-'''Train CIFAR10 with PyTorch.'''
-import torch
-import torch.nn as nn
-import torch.optim as optim
-import torch.nn.functional as F
-import torch.backends.cudnn as cudnn
-
-import torchvision
-import torchvision.transforms as transforms
-
-import os
+"""Train CIFAR10 with PyTorch."""
 import argparse
 import time
 
-from models import *
+import hyadis
+import torch
+import torchvision
+import torchvision.transforms as transforms
+from hyadis.elastic import ReturnObjects
+from hyadis.elastic.parallel import (
+    ElasticDistributedDataLoader,
+)
+from hyadis.elastic.runner import ElasticRunner
+from hyadis.utils import get_job_id, get_logger
+from tqdm import tqdm
 
-from torch.optim.lr_scheduler import ExponentialLR
-from tensorboardX import SummaryWriter
-
-s = time.time()
-
-parser = argparse.ArgumentParser(description='PyTorch CIFAR10 Training')
-parser.add_argument('--bs', default=128, type=int, help='batch size')
-parser.add_argument('--lr', default=0.08, type=float, help='learning rate')
-parser.add_argument('--epochs', default=90, type=int, help='number of epochs')
-parser.add_argument('--model', default='ResNet18', type=str, help='model')
-args = parser.parse_args()
-
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-
-# Data
-print('==> Preparing data..')
-transform_train = transforms.Compose([
-    transforms.RandomCrop(32, padding=4),
-    transforms.RandomHorizontalFlip(),
-    transforms.ToTensor(),
-    transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
-])
-
-transform_test = transforms.Compose([
-    transforms.ToTensor(),
-    transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
-])
-
-trainset = torchvision.datasets.CIFAR10(root="/workspace/data", train=True, download=True, transform=transform_train)
-trainloader = torch.utils.data.DataLoader(trainset, batch_size=args.bs, shuffle=True, num_workers=2, drop_last=True)
-trainloader.autoscale_batch_size(4096, local_bsz_bounds=(32, 1024),
-                                 gradient_accumulation=True)
-
-validset = torchvision.datasets.CIFAR10(root="/workspace/data", train=False, download=False, transform=transform_test)
-validloader = torch.utils.data.DataLoader(validset, batch_size=100, shuffle=False, num_workers=2)
-
-# Model
-print('==> Building model..')
-net = eval(args.model)()
-# net = VGG('VGG19')
-# net = ResNet18()
-# net = PreActResNet18()
-# net = GoogLeNet()
-# net = DenseNet121()
-# net = ResNeXt29_2x64d()
-# net = MobileNet()
-# net = MobileNetV2()
-# net = DPN92()
-# net = ShuffleNetG2()
-# net = SENet18()
-# net = ShuffleNetV2(1)
-net = net.to(device)
-if device == 'cuda':
-    cudnn.benchmark = True
-
-criterion = nn.CrossEntropyLoss()
-#optimizer = optim.SGD([{"params": [param]} for param in net.parameters()],
-optimizer = optim.SGD(net.parameters(),
-                      lr=args.lr, momentum=0.9, weight_decay=5e-4)
-lr_scheduler = ExponentialLR(optimizer, 0.0133 ** (1.0 / args.epochs))
-
-# Training
-def train(epoch):
-    print('\nEpoch: %d' % epoch)
-    begin_train_time = time.time()
-    net.train()
-    for inputs, targets in trainloader:
-        inputs, targets = inputs.to(device), targets.to(device)
-        optimizer.zero_grad()
-        outputs = net(inputs)
-        loss = criterion(outputs, targets)
-        loss.backward()
-        optimizer.step()
-
-        _, predicted = outputs.max(1)
-
-        trainloader.to_tensorboard(writer, epoch, tag_prefix="AdaptDL/Data")
-        net.to_tensorboard(writer, epoch, tag_prefix="AdaptDL/Model")
-
-    use_time = time.time() - begin_train_time
-
-def valid(epoch):
-    begin_valid_time = time.time()
-    net.eval()
-    with torch.no_grad():
-        for inputs, targets in validloader:
-            inputs, targets = inputs.to(device), targets.to(device)
-            outputs = net(inputs)
-            loss = criterion(outputs, targets)
-
-            _, predicted = outputs.max(1)
-    
-    use_time = time.time() - begin_valid_time
-    
+def get_model_from_string(model_string):
+    """Candidates:
+    net = VGG('VGG19')
+    net = ResNet18()
+    net = PreActResNet18()
+    net = GoogLeNet()
+    net = DenseNet121()
+    net = ResNeXt29_2x64d()
+    net = MobileNet()
+    net = MobileNetV2()
+    net = DPN92()
+    net = ShuffleNetG2()
+    net = SENet18()
+    net = ShuffleNetV2(1)
+    """
+    from models.resnet import ResNet18, ResNet34, ResNet50, ResNet101, ResNet152
+    return eval(model_string)()
 
 
-with SummaryWriter(os.getenv("ADAPTDL_TENSORBOARD_LOGDIR", "/tmp")) as writer:
-    for epoch in range(args.epochs):
-        train(epoch)
-        valid(epoch)
-        lr_scheduler.step()
-    writer.export_scalars_to_json(os.getenv("ADAPTDL_TENSORBOARD_LOGDIR", "/tmp") + 'tensorboard.json')
+@hyadis.elastic.initialization(True)
+def init_all_workers(args, batch_size=None, learning_rate=None, **kwargs):
+    model = get_model_from_string(args.model)
+    model.to(torch.cuda.current_device())
+
+    train_loader = ElasticDistributedDataLoader(
+        dataset=torchvision.datasets.CIFAR10(
+            root=args.data_path,
+            train=True,
+            download=True,
+            transform=transforms.Compose(
+                [
+                    transforms.RandomCrop(32, padding=4),
+                    transforms.RandomHorizontalFlip(),
+                    transforms.ToTensor(),
+                    transforms.Normalize(
+                        (0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)
+                    ),
+                ]
+            ),
+        ),
+        batch_size=batch_size,
+        shuffle=True,
+        drop_last=False,
+    )
+    criterion = torch.nn.CrossEntropyLoss()
+    optimizer = torch.optim.SGD(
+        model.parameters(), lr=learning_rate, momentum=0.9, weight_decay=5e-4
+    )
+
+    return ReturnObjects(
+        model=model, data=train_loader, optim=optimizer, criterion=criterion
+    )
+
+
+@hyadis.elastic.train_step
+def step(data, engine, **kwargs):
+    engine.train()
+    inputs, targets = data
+    inputs, targets = inputs.to(torch.cuda.current_device()), targets.to(
+        torch.cuda.current_device()
+    )
+    engine.zero_grad()
+    outputs = engine(inputs)
+    loss = engine.criterion(outputs, targets)
+    engine.backward(loss)
+    engine.step()
+    return ReturnObjects(loss=loss)
+
+
+class EpochProgressBar:
+    def __init__(self, runner, description):
+        self.progress_bar = tqdm(total=len(runner.data), desc=description)
+        self.num_samples = 0
+        self.runner = runner
+
+    def __enter__(self):
+        self.start_time = time.time()
+        return self
+
+    def update(self, sample_count: int, progress: int = 1):
+        self.num_samples += sample_count
+        self.progress_bar.update(progress)
+
+    def __exit__(self, type, value, traceback):
+        self.progress_bar.close()
+        self.end_time = time.time()
+        get_logger().info(
+            f"Loss = {self.runner.reduced_loss.item():.3f} | "
+            + f"LR = {self.runner.learning_rate:.3f} | "
+            + f"Throughput = {self.num_samples/(self.end_time - self.start_time):.3f}"
+        )
+
+
+class LoggingRunner:
+    def __init__(self, *args, **kwargs):
+        self.job_start = time.time()
+        print(f"job id {get_job_id()} start")
+        self.runner = hyadis.elastic.init(*args, **kwargs)
+        print(f"job id {get_job_id()} ready")
+
+    def __enter__(self):
+        return self.runner
+
+    def __exit__(self, type, value, traceback):
+        print(
+            f"{get_job_id()} complete: used time = {time.time() - self.job_start:.3f} s"
+        )
+        self.runner.shutdown()
+
+
+def train_epoch(epoch: int, runner: ElasticRunner):
+    runner.set_epoch(epoch)
+
+    with EpochProgressBar(runner, description=f"Epoch {epoch}") as p:
+        epoch_end = False
+        while not epoch_end:
+            epoch_end = step()
+            p.update(sample_count=runner.global_batch_size)
+
+
+def main(args):
+    hyadis.init(address="auto")
+
+    with LoggingRunner(
+        args.num_workers,
+        use_gpu=True,
+        autoscale=False,
+        global_batch_size=args.batch_size * args.num_workers,
+        learning_rate=args.learning_rate,
+    ) as runner:
+        init_all_workers(args)
+        for epoch in range(args.epochs):
+            train_epoch(epoch, runner)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="PyTorch CIFAR10 Training")
+    parser.add_argument(
+        "--data_path",
+        required=True,
+        type=str,
+        help="training data path, same at all workers.",
+    )
+    parser.add_argument("--num_workers", required=True, type=int)
+    parser.add_argument("--batch_size", default=128, type=int, help="batch size")
+    parser.add_argument(
+        "--learning_rate", default=0.08, type=float, help="learning rate"
+    )
+    parser.add_argument("--epochs", default=90, type=int, help="number of epochs")
+    parser.add_argument(
+        "--model", default="ResNet18", type=str, help="model name in model.py"
+    )
+
+    main(parser.parse_args())
