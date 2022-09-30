@@ -1,4 +1,4 @@
-FROM pytorch/pytorch:1.12.1-cuda11.3-cudnn8-runtime-cifar10-imagenet1k
+FROM nvcr.io/nvidia/pytorch:21.10-py3
 WORKDIR /root
 
 COPY adaptdl/requirements.txt requirements.txt

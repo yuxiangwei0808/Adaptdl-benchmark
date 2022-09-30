@@ -5,37 +5,27 @@ metadata:
 spec:
   template:
     spec:
-      affinity:
-        nodeAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            nodeSelectorTerms:
-            - matchExpressions:
-              - key: workloads-to-do
-                operator: In
-                values:
-                - do-submit
-                - do-job
       containers:
       - name: main
         command:
         - python3
         - /root/yolov3/train.py
-        - --weight_path=/workspace/test/VOC/darknet53_448.weights
+        - --weight_path=/benchmark/VOC/darknet53_448.weights
         env:
         - name: PYTHONUNBUFFERED
           value: "true"
         resources:
           limits:
             nvidia.com/gpu: 1
-            cpu: 10
-            memory: "40G"
+            cpu: 20
+            memory: "100G"
           requests:
             nvidia.com/gpu: 1
-            cpu: 10
-            memory: "40G"
+            cpu: 20
+            memory: "100G"
         volumeMounts:
         - name: data
-          mountPath: /workspace/test
+          mountPath: /benchmark
           readOnly: true
       volumes:
       - name: data

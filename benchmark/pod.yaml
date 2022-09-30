@@ -6,7 +6,7 @@ metadata:
 spec:
   containers:
   - name: monitor
-    image: ubuntu:18.04
+    image:  cr-cn-beijing.volces.com/hpcaitech/adaptdl-submit:1.12.1-cuda11.3-cudnn8-runtime-cifar10-imagenet1k
     command: ["sleep", "1000000000"]
     volumeMounts:
     - name: pollux

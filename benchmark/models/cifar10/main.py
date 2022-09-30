@@ -47,12 +47,12 @@ transform_test = transforms.Compose([
     transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
 ])
 
-trainset = torchvision.datasets.CIFAR10(root="/workspace/data", train=True, download=True, transform=transform_train)
+trainset = torchvision.datasets.CIFAR10(root="/benchmark/cifar-10", train=True, download=True, transform=transform_train)
 trainloader = adaptdl.torch.AdaptiveDataLoader(trainset, batch_size=args.bs, shuffle=True, num_workers=2, drop_last=True)
 trainloader.autoscale_batch_size(4096, local_bsz_bounds=(32, 1024),
                                  gradient_accumulation=True)
 
-validset = torchvision.datasets.CIFAR10(root="/workspace/data", train=False, download=False, transform=transform_test)
+validset = torchvision.datasets.CIFAR10(root="/benchmark/cifar-10", train=False, download=False, transform=transform_test)
 validloader = adaptdl.torch.AdaptiveDataLoader(validset, batch_size=100, shuffle=False, num_workers=2)
 
 # Model
@@ -107,17 +107,25 @@ def train(epoch):
 
     use_time = time.time() - begin_train_time
     with stats.synchronized():
-        stats["loss_avg"] = stats["loss_sum"] / stats["total"]
-        stats["accuracy"] = stats["correct"] / stats["total"]
+        try:
+            stats["loss_avg"] = stats["loss_sum"] / stats["total"]
+            stats['accuracy'] = stats["correct"] / stats["total"]
+        except KeyError:        
+            stats['loss_sum'] = 0
+            stats["total"] = 0
+            stats["correct"] = 0
+            stats['loss_avg'], stats['accuracy'] = 0, 0
         writer.add_scalar("Loss/Train", stats["loss_avg"], epoch)
         writer.add_scalar("Accuracy/Train", stats["accuracy"], epoch)
-        report_train_metrics(epoch, stats["loss_avg"], accuracy=stats["accuracy"], per_epoch_time=use_time, samples=stats["total"])
+        report_train_metrics(epoch, stats["loss_avg"], accuracy=stats['accuracy'], per_epoch_time=use_time, samples=stats["total"])
         print("Train:", stats)
 
 def valid(epoch):
     begin_valid_time = time.time()
     net.eval()
+    print('begin valid')
     stats = adaptdl.torch.Accumulator()
+
     with torch.no_grad():
         for inputs, targets in validloader:
             inputs, targets = inputs.to(device), targets.to(device)
@@ -131,11 +139,17 @@ def valid(epoch):
     
     use_time = time.time() - begin_valid_time
     with stats.synchronized():
-        stats["loss_avg"] = stats["loss_sum"] / stats["total"]
-        stats["accuracy"] = stats["correct"] / stats["total"]
+        try:
+            stats["loss_avg"] = stats["loss_sum"] / stats["total"]
+            stats['accuracy'] = stats["correct"] / stats["total"]
+        except KeyError:        
+            stats['loss_sum'] = 0
+            stats["total"] = 0
+            stats["correct"] = 0
+            stats['loss_avg'], stats['accuracy'] = 0, 0
         writer.add_scalar("Loss/Valid", stats["loss_avg"], epoch)
         writer.add_scalar("Accuracy/Valid", stats["accuracy"], epoch)
-        report_valid_metrics(epoch, stats["loss_avg"], accuracy=stats["accuracy"], per_epoch_time=use_time, samples=stats["total"])
+        report_valid_metrics(epoch, stats['loss_avg'], accuracy=stats['accuracy'], per_epoch_time=use_time, samples=stats["total"])
         print("Valid:", stats)
     
 

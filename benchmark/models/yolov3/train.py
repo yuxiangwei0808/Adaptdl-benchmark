@@ -72,6 +72,7 @@ class Trainer(object):
         self.yolov3.train()
 
         accum = adaptdl.torch.Accumulator()
+        
         begin_valid_time = time.time()
         with torch.no_grad():
             for imgs, label_sbbox, label_mbbox, label_lbbox, sbboxes, mbboxes, lbboxes in self.valid_dataloader:
@@ -101,7 +102,12 @@ class Trainer(object):
 
         use_valid_time = time.time() - begin_valid_time
         with accum.synchronized():
-            accum["loss_avg"] = accum["loss_sum"] / accum["loss_cnt"]
+            try:
+                accum["loss_avg"] = accum["loss_sum"] / accum["loss_cnt"]
+            except KeyError:
+                accum["loss_sum"] = 0
+                accum["loss_cnt"] = 0
+                accum["loss_avg"] = 0
             writer.add_scalar("Loss/Valid", accum["loss_avg"], epoch)
             report_valid_metrics(epoch, accum["loss_avg"], per_epoch_time=use_valid_time, samples=accum["loss_cnt"])
             print("Valid:", accum)
@@ -114,7 +120,9 @@ class Trainer(object):
             for epoch in adaptdl.torch.remaining_epochs_until(self.epochs):
                 self.yolov3.train()
                 begin_train_time = time.time()
+                
                 accum = adaptdl.torch.Accumulator()
+
                 for imgs, label_sbbox, label_mbbox, label_lbbox, sbboxes, mbboxes, lbboxes in self.train_dataloader:
                     imgs = imgs.cuda()
                     label_sbbox = label_sbbox.cuda()
@@ -161,10 +169,16 @@ class Trainer(object):
                                         cfg.TRAIN["WARMUP_EPOCHS"]) * cfg.TRAIN["LR_INIT"]
                     print("lr =", self.optimizer.param_groups[0]["lr"])
 
-                    use_train_time = time.time() - begin_train_time
-                    
+                use_train_time = time.time() - begin_train_time
+                print('asd', use_train_time)
+
                 with accum.synchronized():
-                    accum["loss_avg"] = accum["loss_sum"] / accum["loss_cnt"]
+                    try:
+                        accum["loss_avg"] = accum["loss_sum"] / accum["loss_cnt"]
+                    except KeyError:
+                        accum["loss_sum"] = 0
+                        accum["loss_cnt"] = 0
+                        accum["loss_avg"] = 0
                     writer.add_scalar("Loss/Train", accum["loss_avg"], epoch)
                     report_train_metrics(epoch, accum["loss_avg"], per_epoch_time=use_train_time, samples=accum["loss_cnt"])
                     print("Train:", accum)

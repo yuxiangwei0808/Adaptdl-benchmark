@@ -1,4 +1,4 @@
-FROM cr-cn-beijing.volces.com/hpcaitech/adaptdl-submit:21.10-py3
+FROM nvcr.io/nvidia/pytorch:21.10-py3
 WORKDIR /root
 
 COPY adaptdl/requirements.txt requirements.txt

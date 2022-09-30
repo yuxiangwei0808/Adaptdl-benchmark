@@ -8,7 +8,7 @@ from kubernetes import client, config, watch
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--output", type=str, help="path to output file", default='/home/lcwyx/demo_adaptdl/job_submit/adaptdl/benchmark/logs/job_monitor_whole.json')
+    parser.add_argument("--output", type=str, help="path to output file", default='/home/lcwyx/demo_adaptdl/job_submit/adaptdl/benchmark/monitor_1/job_monitor_whole.json')
     args = parser.parse_args()
 
     config.load_kube_config()
@@ -38,7 +38,7 @@ if __name__ == "__main__":
         for job in record['submitted_jobs']:
             name = job['name']
             timestamp = record['timestamp']
-            with open(f'/home/lcwyx/demo_adaptdl/job_submit/adaptdl/benchmark/logs/{name}.json', 'a') as f:
+            with open(f'/home/lcwyx/demo_adaptdl/job_submit/adaptdl/benchmark/monitor_1/{name}.json', 'a') as f:
                 f.write(f'timestamp: {timestamp} ')
                 json.dump(job, f)
                 f.write('\n')

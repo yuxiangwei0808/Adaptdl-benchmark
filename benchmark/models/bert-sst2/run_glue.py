@@ -223,7 +223,7 @@ def main(task_name=None):
     if task_name is not None:
         args.task_name = task_name
         
-    tb_writer = SummaryWriter(os.path.join(os.getenv("ADAPTDL_TENSORBOARD_LOGDIR", "/tmp"), f'/{args.task_name}'))
+    tb_writer = SummaryWriter(os.getenv("ADAPTDL_TENSORBOARD_LOGDIR", "/tmp"))
     # tb_writer = SummaryWriter('./tmp')
 
     # Initialize the accelerator. We will let the accelerator handle device placement for us in this example.
@@ -294,7 +294,7 @@ def main(task_name=None):
     #     extension = (args.train_file if args.train_file is not None else args.validation_file).split(".")[-1]
     #     raw_datasets = load_dataset(extension, data_files=data_files)
     # raw_datasets.save_to_disk(f'./data/{args.task_name}/')
-    raw_datasets = load_from_disk(f'/workspace/test/glue/{args.task_name}')
+    raw_datasets = load_from_disk(f'/benchmark/glue/{args.task_name}')
     # raw_datasets = load_from_disk(f'/home/lcwyx/demo_adaptdl/job_submit/adaptdl/benchmark/models/bert/data/{args.task_name}')
 
     # See more about loading any type of standard or custom dataset at
@@ -324,7 +324,7 @@ def main(task_name=None):
     #
     # In distributed training, the .from_pretrained methods guarantee that only one local process can concurrently
     # download model & vocab.
-    config = AutoConfig.from_pretrained(args.model_name_or_path, num_labels=num_labels, finetuning_task=args.task_name)
+    config = AutoConfig.from_pretrained(args.model_name_or_path, num_labels=num_labels, finetuning_task=args.task_name, cache_dir=args.cache_dir)
     tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, use_fast=not args.use_slow_tokenizer, cache_dir=args.cache_dir if args.cache_dir else None,)
     model = AutoModelForSequenceClassification.from_pretrained(
         args.model_name_or_path,
@@ -546,7 +546,7 @@ def main(task_name=None):
         accum = adaptdl.torch.Accumulator()
         # if args.with_tracking:
         #     total_loss = 0
-        begin = time.time()
+        begin_train = time.time()
         for step, batch in enumerate(train_dataloader):
             batch_size = len(batch['input_ids'][0])
             model.train()
@@ -616,9 +616,14 @@ def main(task_name=None):
             print(current_step, loss.item())
             # if completed_steps >= args.max_train_steps:
             #     break
-        use_time = time.time() - begin
+        use_time = time.time() - begin_train
         with accum.synchronized():
-            accum["loss_avg"] = accum["loss_sum"] / accum["loss_cnt"]
+            try:
+                accum["loss_avg"] = accum["loss_sum"] / accum["loss_cnt"]
+            except KeyError:
+                accum["loss_sum"] = 0
+                accum["loss_cnt"] = 0
+                accum["loss_avg"] = 0
             tb_writer.add_scalar("Loss/Train", accum["loss_avg"], epoch)
             report_train_metrics(epoch, accum["loss_avg"], per_epoch_time=use_time, samples=accum["loss_cnt"], task_name=args.task_name)
             print("Train:", accum)
@@ -628,6 +633,7 @@ def main(task_name=None):
         model.eval()
         samples_seen = 0
         begin_valid = time.time()
+        accum_valid = adaptdl.torch.Accumulator()
         for step, batch in enumerate(eval_dataloader):
             with torch.no_grad():
                 batch_size = len(batch['input_ids'][0])
@@ -647,8 +653,8 @@ def main(task_name=None):
                 outputs = model(**batch)
                 valid_loss = outputs.loss
 
-                accum["loss_sum"] += valid_loss.item()
-                accum["loss_cnt"] += batch['input_ids'].shape[0]
+                accum_valid["loss_sum"] += valid_loss.item()
+                accum_valid["loss_cnt"] += batch['input_ids'].shape[0]
                 
             predictions = outputs.logits.argmax(dim=-1) if not is_regression else outputs.logits.squeeze()
             # predictions, references = accelerator.gather((predictions, batch["labels"]))
@@ -677,11 +683,16 @@ def main(task_name=None):
                 }
             )
         use_time = time.time() - begin_valid
-        with accum.synchronized():
-            accum["loss_avg"] = accum["loss_sum"] / accum["loss_cnt"]
-            tb_writer.add_scalar("Loss/Valid", accum["loss_avg"], epoch)
+        with accum_valid.synchronized():
+            try:
+                accum_valid["loss_avg"] = accum_valid["loss_sum"] / accum_valid["loss_cnt"]
+            except KeyError:
+                accum_valid["loss_sum"] = 0
+                accum_valid["loss_cnt"] = 0
+                accum_valid["loss_avg"] = 0
+            tb_writer.add_scalar("Loss/Valid", accum_valid["loss_avg"], epoch)
             tb_writer.add_scalar('eval_acc', eval_metric["accuracy"], epoch)
-            report_valid_metrics(epoch, accum["loss_avg"], accuracy=eval_metric["accuracy"], per_epoch_time=use_time, samples=accum["loss_cnt"], task_name=args.task_name)
+            report_valid_metrics(epoch, accum_valid["loss_avg"], accuracy=eval_metric["accuracy"], per_epoch_time=use_time, samples=accum_valid["loss_cnt"], task_name=args.task_name)
 
         # if args.push_to_hub and epoch < args.num_train_epochs - 1:
         #     accelerator.wait_for_everyone()
@@ -741,11 +752,12 @@ def main(task_name=None):
     if args.output_dir is not None:
         with open(os.path.join(args.output_dir, "all_results.json"), "w") as f:
             json.dump({"eval_accuracy": eval_metric["accuracy"]}, f)
-    tb_writer.export_scalars_to_json(os.getenv("ADAPTDL_TENSORBOARD_LOGDIR", "/tmp") + f'{args.task_name}_tensorboard.json')
+    tb_writer.export_scalars_to_json(os.path.join(os.getenv("ADAPTDL_TENSORBOARD_LOGDIR", "/tmp") + f'{args.task_name}_tensorboard.json'))
     tb_writer.close()
 
 
 if __name__ == "__main__":
+    time.sleep(300)
     s = time.time()
     main()
     with open(adaptdl.env.checkpoint_path() + "/overall_results.txt", "a") as f:

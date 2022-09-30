@@ -154,8 +154,8 @@ def train(train_loader, model, criterion, optimizer, epoch, args, writer):
         len(train_loader.dataset),
         [batch_time, data_time, losses, top1, top5],
         prefix="Epoch: [{}]".format(epoch))
-    stats = adaptdl.torch.Accumulator()
 
+    stats = adaptdl.torch.Accumulator()
     # switch to train mode
     model.train()
 
@@ -205,9 +205,17 @@ def train(train_loader, model, criterion, optimizer, epoch, args, writer):
 
     use_time = time.time() - begin_train_time
     with stats.synchronized():
-        stats["train_loss_avg"] = stats["train_loss_sum"] / stats["train_total"]
-        stats["acc1"] = stats["correct1"] / stats["total1"]
-        stats["acc5"] = stats["correct5"] / stats["total5"]
+        try:
+            stats["train_loss_avg"] = stats["train_loss_sum"] / stats["train_total"]
+            stats["acc1"] = stats["correct1"] / stats["total1"]
+            stats["acc5"] = stats["correct5"] / stats["total5"]
+        except KeyError:
+            stats["train_loss_sum"] = 0
+            stats["train_total"] = 0
+            stats["correct1"], stats["total1"] = 0, 0
+            stats["correct5"], stats["total5"] = 0, 0
+            stats["train_loss_avg"], stats["acc1"], stats["acc5"] = 0, 0, 0
+            
         writer.add_scalar("Loss/Train", stats["train_loss_avg"], epoch)
         report_train_metrics(epoch, stats["train_loss_avg"], acc1=stats["acc1"], acc5 = stats["acc5"], \
             per_epoch_time=use_time, samples=stats["total"])
@@ -222,6 +230,7 @@ def validate(val_loader, model, criterion, epoch, args, writer):
         len(val_loader.dataset),
         [batch_time, losses, top1, top5],
         prefix='Test: ')
+        
     stats = adaptdl.torch.Accumulator()
 
     # switch to evaluate mode
@@ -263,9 +272,16 @@ def validate(val_loader, model, criterion, epoch, args, writer):
               .format(top1=top1, top5=top5))
         use_time = time.time() - begin_valid_time
         with stats.synchronized():
-            stats["acc1"] = stats["correct1"] / stats["total1"]
-            stats["acc5"] = stats["correct5"] / stats["total5"]
-            stats["loss"] = stats["loss_sum"] / stats["loss_cnt"]
+            try:
+                stats["loss"] = stats["loss_sum"] / stats["loss_cnt"]
+                stats["acc1"] = stats["correct1"] / stats["total1"]
+                stats["acc5"] = stats["correct5"] / stats["total5"]
+            except KeyError:
+                stats["loss_sum"] = 0
+                stats["loss_cnt"] = 0
+                stats["correct1"], stats["total1"] = 0, 0
+                stats["correct5"], stats["total5"] = 0, 0
+                stats["loss"], stats['acc1'], stats['acc5'] = 0, 0, 0
             writer.add_scalar("top1/Valid", stats["acc1"], epoch)
             writer.add_scalar("top5/Valid", stats["acc5"], epoch)
             report_valid_metrics(epoch, stats["loss"], acc1=stats["acc1"], acc5 = stats["acc5"], \

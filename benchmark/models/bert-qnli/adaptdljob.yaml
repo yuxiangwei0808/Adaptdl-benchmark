@@ -15,7 +15,7 @@ spec:
         - --per_device_train_batch_size=32
         - --learning_rate=3e-5
         - --num_train_epochs=3
-        - --cache_dir=/workspace/test/glue
+        - --cache_dir=/benchmark/glue
         - --output_dir=/tmp/output
         - --with_tracking
         env:
@@ -24,15 +24,15 @@ spec:
         resources:
           limits:
             nvidia.com/gpu: 1
-            cpu: 10
-            memory: "40G"
+            cpu: 20
+            memory: "100G"
           requests:
             nvidia.com/gpu: 1
-            cpu: 10
-            memory: "40G"
+            cpu: 20
+            memory: "100G"
         volumeMounts:
         - name: storage
-          mountPath: /workspace/test
+          mountPath: /benchmark
       volumes:
       - name: storage
         persistentVolumeClaim:

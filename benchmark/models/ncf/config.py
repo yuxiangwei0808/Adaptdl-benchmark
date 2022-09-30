@@ -10,7 +10,7 @@ model = 'NeuMF-end'
 assert model in ['MLP', 'GMF', 'NeuMF-end', 'NeuMF-pre']
 
 # paths
-main_path = '/workspace/test/ncf/'
+main_path = '/benchmark/ncf/'
 
 train_rating = main_path + '{}.train.rating'.format(dataset)
 test_rating = main_path + '{}.test.rating'.format(dataset)

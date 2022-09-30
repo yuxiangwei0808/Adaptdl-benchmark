@@ -13,24 +13,24 @@ spec:
         - --arch=resnet50
         - --batch-size=128
         - --lr=0.01
-        - --epochs=150
+        - --epochs=70
         - --autoscale-bsz
-        - /workspace/test/imagenet-1k
+        - /benchmark/imagenet-1k
         env:
         - name: PYTHONUNBUFFERED
           value: "true"
         resources:
           limits:
             nvidia.com/gpu: 1
-            cpu: 10
-            memory: "40G"
+            cpu: 20
+            memory: "100G"
           requests:
             nvidia.com/gpu: 1
-            cpu: 10
-            memory: "40G"
+            cpu: 20
+            memory: "100G"
         volumeMounts:
         - name: data
-          mountPath: /workspace/test
+          mountPath: /benchmark
       volumes:
       - name: data
         persistentVolumeClaim:

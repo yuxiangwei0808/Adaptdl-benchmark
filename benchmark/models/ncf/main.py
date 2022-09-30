@@ -127,7 +127,9 @@ with SummaryWriter(os.getenv("ADAPTDL_TENSORBOARD_LOGDIR", "/tmp")) as writer:
         model.train() # Enable dropout (if have).
         start_time = time.time()
         train_loader.dataset.ng_sample()
+        
         stats = adaptdl.torch.Accumulator()
+
         for idx, (user, item, label) in enumerate(train_loader):
             user = user.cuda()
             item = item.cuda()
@@ -148,10 +150,15 @@ with SummaryWriter(os.getenv("ADAPTDL_TENSORBOARD_LOGDIR", "/tmp")) as writer:
         end_train_time = time.time()
         use_train_time = time.time() - start_time
         with stats.synchronized():
+          try:
             stats['loss_avg'] = stats['loss_sum'] / stats['total']
-            writer.add_scalar("Loss/Train", stats["loss_avg"], epoch)
-            report_train_metrics(epoch, stats["loss_avg"], per_epoch_time=use_train_time, samples=stats["total"])
-            print("Train:", stats)
+          except KeyError:
+            stats['loss_sum'] = 0
+            stats['total'] = 0
+            stats['loss_avg'] = 0
+          writer.add_scalar("Loss/Train", stats["loss_avg"], epoch)
+          report_train_metrics(epoch, stats["loss_avg"], per_epoch_time=use_train_time, samples=stats["total"])
+          print("Train:", stats)
 
         model.eval()
         HR, NDCG = evaluate.metrics(model, test_loader, args.top_k)

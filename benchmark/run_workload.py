@@ -70,7 +70,7 @@ def cache_images(templates):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--policy", type=str, choices=["pollux", "optimus", "tiresias"], default='pollux')
-    parser.add_argument("--workload", type=str, help="path to workload csv", default='/home/lcwyx/demo_adaptdl/job_submit/adaptdl/benchmark/workloads/workload-0.csv')
+    parser.add_argument("--workload", type=str, help="path to workload csv", default='/home/lcwyx/demo_adaptdl/job_submit/adaptdl/benchmark/workloads/workload-6.csv')
     parser.add_argument("--repository", type=str, default="cr-cn-beijing.volces.com/hpcaitech/adaptdl-submit")
     args = parser.parse_args()
 

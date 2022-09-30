@@ -17,20 +17,26 @@ spec:
         resources:
           limits:
             nvidia.com/gpu: 1
-            cpu: 10
-            memory: "40G"
+            cpu: 20
+            memory: "100G"
           requests:
             nvidia.com/gpu: 1
-            cpu: 10
-            memory: "40G"
+            cpu: 20
+            memory: "100G"
         volumeMounts:
         - name: data
           mountPath: /mnt
+          readOnly: true
+        - name: storage
+          mountPath: /benchmark
           readOnly: true
       volumes:
       - name: data
         hostPath:
           path: /mnt
           type: Directory
+      - name: storage
+        persistentVolumeClaim:
+          claimName: adaptdl-data
       imagePullSecrets:
       - name: regcred
