@@ -1,53 +1,65 @@
+import argparse
 import time
 
-import torch
 import hyadis
-import argparse
-
-from tqdm import tqdm
-from hyadis.elastic.runner import ElasticRunner
+import torch
+import torch.optim as optim
 from hyadis.elastic import ReturnObjects
+from hyadis.elastic.runner import ElasticRunner
 from hyadis.utils import get_job_id, get_logger
+from tqdm import tqdm
+
+import config.yolov3_config_voc as cfg
+import utils.datasets as data
+from model.loss.yolo_loss import YoloV3Loss
+from model.yolov3 import Yolov3
 
 
 @hyadis.elastic.initialization(True)
 def init_all_workers(args, batch_size=None, learning_rate=None, **kwargs):
+    model = Yolov3().cuda(torch.cuda.current_device())
 
-    model = ...
-    model.to(torch.cuda.current_device())
+    train_loader = torch.utils.data.DataLoader(
+        data.VocDataset(anno_file_type="train", img_size=cfg.TRAIN["TRAIN_IMG_SIZE"]),
+        batch_size=cfg.TRAIN["BATCH_SIZE"],
+        num_workers=cfg.TRAIN["NUMBER_WORKERS"],
+        drop_last=True,
+        shuffle=True,
+    )
 
-    train_loader = ...
-    criterion = ...
-    optimizer = ...
+    criterion = YoloV3Loss(
+        anchors=cfg.MODEL["ANCHORS"],
+        strides=cfg.MODEL["STRIDES"],
+        iou_threshold_loss=cfg.TRAIN["IOU_THRESHOLD_LOSS"],
+    )
+
+    optimizer = optim.SGD(
+        model.parameters(),
+        lr=cfg.TRAIN["LR_INIT"],
+        momentum=cfg.TRAIN["MOMENTUM"],
+        weight_decay=cfg.TRAIN["WEIGHT_DECAY"],
+    )
 
     return ReturnObjects(
-        model=model, data=train_loader, optim=optimizer, criterion=criterion
+        model=model, data=train_loader, optim=optimizer, criterion=criterion, foo=None
     )
 
 
 @hyadis.elastic.train_step
 def step(data, engine, **kwargs):
+    get_logger().info(f"{kwargs}")
     engine.train()
-    inputs, targets = data
-    inputs, targets = inputs.to(torch.cuda.current_device()), targets.to(
-        torch.cuda.current_device()
+    imgs, label_sbbox, label_mbbox, label_lbbox, sbboxes, mbboxes, lbboxes = (
+        d.cuda(torch.cuda.current_device()) for d in data
     )
+
     engine.zero_grad()
-    outputs = engine(inputs)
-    loss = engine.criterion(outputs, targets)
+    p, p_d = engine(imgs)
+    loss, loss_giou, loss_conf, loss_cls = engine.criterion(
+        p, p_d, label_sbbox, label_mbbox, label_lbbox, sbboxes, mbboxes, lbboxes)
     engine.backward(loss)
     engine.step()
     return ReturnObjects(loss=loss)
-
-
-def train_epoch(epoch: int, runner: ElasticRunner):
-    runner.set_epoch(epoch)
-
-    with EpochProgressBar(runner, description=f"Epoch {epoch}") as p:
-        epoch_end = False
-        while not epoch_end:
-            epoch_end = step()
-            p.update(sample_count=runner.global_batch_size)
 
 
 class LoggingRunner:
@@ -93,6 +105,16 @@ class EpochProgressBar:
         )
 
 
+def train_epoch(epoch: int, runner: ElasticRunner):
+    runner.set_epoch(epoch)
+
+    with EpochProgressBar(runner, description=f"Epoch {epoch}") as p:
+        epoch_end = False
+        while not epoch_end:
+            epoch_end = step()
+            p.update(sample_count=runner.global_batch_size)
+
+
 def main(args):
     hyadis.init(address="auto")
 
@@ -116,6 +138,10 @@ if __name__ == "__main__":
     parser.add_argument("--epochs", required=True, type=int, help="number of epochs")
     parser.add_argument(
         "--learning_rate", required=True, type=float, help="learning rate"
+    )
+
+    parser.add_argument(
+        "--weight_path", required=True, type=str, help="weight file path"
     )
 
     main(parser.parse_args())

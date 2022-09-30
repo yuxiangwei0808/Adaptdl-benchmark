@@ -11,7 +11,9 @@ export RAY_ADDRESS="http://127.0.0.1:8265"
 
 ray job submit --runtime-env-json='{"working_dir": "./", "pip": []}' -- \
 python main.py \
---data_path=/data/cifar-10/ \
---epochs=20 \
---num_workers=4 \
---batch_size=32
+--weight_path=/data/VOC/darknet53_448.weights \
+--num_workers=2 \
+--batch_size=4 \
+--epochs=30 \
+--learning_rate=0.08
+
