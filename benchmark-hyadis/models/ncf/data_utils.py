@@ -57,6 +57,8 @@ class NCFData(data.Dataset):
 		if train_mat is not None:
 			self.features_ng = [np.where(row == 0.0)[0] for row in train_mat]
 
+		self.ng_sample()
+
 	def ng_sample(self):
 		assert self.is_training, 'no need to sampling when testing'
 		self.features_fill = list(self.features_ps)

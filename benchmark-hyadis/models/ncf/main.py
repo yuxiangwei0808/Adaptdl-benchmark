@@ -1,144 +1,180 @@
 import os
-import math
-import time
-import argparse
-import numpy as np
-from tqdm import tqdm
 import time
 
+import numpy
 import torch
-import torch.nn as nn
-import torch.optim as optim
-import torch.utils.data as data
-import torch.backends.cudnn as cudnn
-
-import model
-import config
-import evaluate
+import hyadis
+import argparse
 import data_utils
 
-s = time.time()
+from tqdm import tqdm
+import torch.optim as optim
+from hyadis.elastic.runner import ElasticRunner
+from hyadis.elastic.parallel import (
+    ElasticDistributedDataLoader,
+)
+from hyadis.elastic import ReturnObjects
+from hyadis.utils import get_job_id, get_logger
 
-parser = argparse.ArgumentParser()
-parser.add_argument("--lr", 
-  type=float, 
-  default=0.001, 
-  help="learning rate")
-parser.add_argument("--dropout", 
-  type=float,
-  default=0.0,  
-  help="dropout rate")
-parser.add_argument("--batch_size", 
-  type=int, 
-  default=256, 
-  help="batch size for training")
-parser.add_argument("--epochs", 
-  type=int,
-  default=20,
-  help="training epoches")
-parser.add_argument("--top_k", 
-  type=int, 
-  default=10, 
-  help="compute metrics@top_k")
-parser.add_argument("--factor_num", 
-  type=int,
-  default=32, 
-  help="predictive factors numbers in the model")
-parser.add_argument("--num_layers", 
-  type=int,
-  default=3, 
-  help="number of layers in MLP model")
-parser.add_argument("--num_ng", 
-  type=int,
-  default=4, 
-  help="sample negative items for training")
-parser.add_argument("--test_num_ng", 
-  type=int,
-  default=99, 
-  help="sample part of negative items for testing")
-parser.add_argument("--out", 
-  default=True,
-  help="save model or not")
-parser.add_argument("--gpu", 
-  type=str,
-  default="0",  
-  help="gpu card ID")
-parser.add_argument("--adaptdl",
-  action="store_true",
-  help="enable adaptdl")
-args = parser.parse_args()
-
-os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
-cudnn.benchmark = True
+from model import NCF
+import config
 
 
-############################## PREPARE DATASET ##########################
-train_data, test_data, user_num, item_num, train_mat = data_utils.load_all()
+@hyadis.elastic.initialization(True)
+def init_all_workers(args, batch_size=None, learning_rate=None, **kwargs):
+    if config.model == "NeuMF-pre":
+        assert os.path.exists(config.GMF_model_path), "lack of GMF model"
+        assert os.path.exists(config.MLP_model_path), "lack of MLP model"
+        GMF_model = torch.load(config.GMF_model_path)
+        MLP_model = torch.load(config.MLP_model_path)
+    else:
+        GMF_model = None
+        MLP_model = None
+    train_data, _, user_num, item_num, train_mat = data_utils.load_all()
 
-# construct the train and test datasets
-train_dataset = data_utils.NCFData(
-    train_data, item_num, train_mat, args.num_ng, True)
-test_dataset = data_utils.NCFData(
-    test_data, item_num, train_mat, 0, False)
-train_loader = data.DataLoader(train_dataset,
-    batch_size=args.batch_size, shuffle=True, num_workers=4)
-test_loader = data.DataLoader(test_dataset,
-    batch_size=args.test_num_ng+1, shuffle=False, num_workers=0)
+    model = NCF(
+        user_num,
+        item_num,
+        args.factor_num,
+        args.num_layers,
+        args.dropout,
+        config.model,
+        GMF_model,
+        MLP_model,
+    )
+    model.cuda(torch.cuda.current_device())
 
-########################### CREATE MODEL #################################
-if config.model == 'NeuMF-pre':
-    assert os.path.exists(config.GMF_model_path), 'lack of GMF model'
-    assert os.path.exists(config.MLP_model_path), 'lack of MLP model'
-    GMF_model = torch.load(config.GMF_model_path)
-    MLP_model = torch.load(config.MLP_model_path)
-else:
-    GMF_model = None
-    MLP_model = None
+    train_loader = ElasticDistributedDataLoader(
+        data_utils.NCFData(train_data, item_num, train_mat, args.num_ng, True),
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=4,
+    )
+    criterion = torch.nn.BCEWithLogitsLoss()
 
-model = model.NCF(user_num, item_num, args.factor_num, args.num_layers, 
-                  args.dropout, config.model, GMF_model, MLP_model)
-model.cuda()
-loss_function = nn.BCEWithLogitsLoss()
+    if config.model == 'NeuMF-pre':
+        optimizer = optim.SGD(model.parameters(), lr=learning_rate)
+    else:
+        optimizer = optim.Adam(model.parameters(), betas=(0.9, 0.999), lr=learning_rate)
 
-if config.model == 'NeuMF-pre':
-    optimizer = optim.SGD(model.parameters(), lr=args.lr)
-else:
-    # optimizer = optim.SGD(model.parameters(), lr=args.lr)
-    optimizer = optim.Adam(model.parameters(), betas=(0.9, 0.999), lr=args.lr)
-scheduler = optim.lr_scheduler.MultiStepLR(optimizer, [4, 7, 10], gamma=0.2)
+    return ReturnObjects(
+        model=model, data=train_loader, optim=optimizer, criterion=criterion
+    )
 
 
-train_loader = torch.utils.data.DataLoader(train_dataset, drop_last=True,
-                                                 batch_size=args.batch_size,
-                                                 shuffle=True, num_workers=4)
+@hyadis.elastic.train_step
+def step(data, engine, **kwargs):
+    engine.train()
+    user, item, label = data
+    user = user.cuda(torch.cuda.current_device())
+    item = item.cuda(torch.cuda.current_device())
+    label = label.float().cuda(torch.cuda.current_device())
+    engine.zero_grad()
 
-########################### TRAINING #####################################
-for epoch in range(args.epochs):
-    pbar = tqdm(train_loader, f"NCF {epoch}/{args.epochs}")
-    with pbar as t:
-        model.train() # Enable dropout (if have).
-        start_time = time.time()
-        train_loader.dataset.ng_sample()
-        for idx, (user, item, label) in enumerate(t):
-            user = user.cuda()
-            item = item.cuda()
-            label = label.float().cuda()
+    prediction = engine(user, item)
+    loss = engine.criterion(prediction, label)
+    engine.step()
+    return ReturnObjects(loss=loss)
 
-            model.zero_grad()
-            prediction = model(user, item)
-            loss = loss_function(prediction, label)
-            loss.backward()
-            optimizer.step()
 
-        model.eval()
-        HR, NDCG = evaluate.metrics(model, test_loader, args.top_k)
-        
-        elapsed_time = time.time() - start_time
-        print("\nThe time elapse of epoch {:03d}".format(epoch) + " is: " + 
-              time.strftime("%H: %M: %S", time.gmtime(elapsed_time)))
+class LoggingRunner:
+    def __init__(self, *args, **kwargs):
+        self.job_start = time.time()
+        self.logger = get_logger()
 
-        scheduler.step()
+        self.logger.info(f"job id {get_job_id()} start")
+        self.runner = hyadis.elastic.init(*args, **kwargs)
+        self.logger.info(f"job id {get_job_id()} ready")
 
-# with open(adaptdl.env.checkpoint_path() + "/overall_results.txt", "a") as f:
-#         f.write(f'total consume time: {time.time() - s}')
+    def __enter__(self):
+        return self.runner
 
+    def __exit__(self, type, value, traceback):
+        self.logger.info(
+            f"{get_job_id()} complete: used time = {time.time() - self.job_start:.3f} s"
+        )
+        self.runner.shutdown()
+
+
+class EpochProgressBar:
+    def __init__(self, runner, description):
+        self.progress_bar = tqdm(total=len(runner.data), desc=description)
+        self.num_samples = 0
+        self.runner = runner
+
+    def __enter__(self):
+        self.start_time = time.time()
+        return self
+
+    def update(self, sample_count: int, progress: int = 1):
+        self.num_samples += sample_count
+        self.progress_bar.update(progress)
+
+    def __exit__(self, type, value, traceback):
+        self.progress_bar.close()
+        self.end_time = time.time()
+        get_logger().info(
+            f"Loss = {self.runner.reduced_loss.item():.3f} | "
+            + f"LR = {self.runner.learning_rate:.3f} | "
+            + f"Throughput = {self.num_samples/(self.end_time - self.start_time):.3f}"
+        )
+
+
+def train_epoch(epoch: int, runner: ElasticRunner):
+    runner.set_epoch(epoch)
+
+    with EpochProgressBar(runner, description=f"Epoch {epoch}") as p:
+        epoch_end = False
+        runner.data.dataset.ng_sample()
+        while not epoch_end:
+            epoch_end = step()
+            p.update(sample_count=runner.global_batch_size)
+
+
+def main(args):
+    hyadis.init(address="auto")
+
+    with LoggingRunner(
+        args.num_workers,
+        use_gpu=True,
+        autoscale=False,
+        global_batch_size=args.batch_size * args.num_workers,
+        learning_rate=args.learning_rate,
+    ) as runner:
+        init_all_workers(args)
+        for epoch in range(args.epochs):
+            train_epoch(epoch, runner)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="PyTorch CIFAR10 Training")
+
+    parser.add_argument("--num_workers", required=True, type=int)
+    parser.add_argument("--batch_size", required=True, type=int, help="batch size")
+    parser.add_argument("--epochs", required=True, type=int, help="number of epochs")
+    parser.add_argument(
+        "--learning_rate", required=True, type=float, help="learning rate"
+    )
+
+    parser.add_argument("--dropout", type=float, default=0.0, help="dropout rate")
+    parser.add_argument(
+        "--factor_num",
+        type=int,
+        default=32,
+        help="predictive factors numbers in the model",
+    )
+
+    parser.add_argument(
+        "--num_layers", type=int, default=3, help="number of layers in MLP model"
+    )
+    parser.add_argument(
+        "--num_ng", type=int, default=4, help="sample negative items for training"
+    )
+    parser.add_argument(
+        "--test_num_ng",
+        type=int,
+        default=99,
+        help="sample part of negative items for testing",
+    )
+
+    main(parser.parse_args())
